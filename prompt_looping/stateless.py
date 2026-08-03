@@ -163,7 +163,6 @@ REFINE_PROMPT = ChatPromptTemplate.from_template(
 
 @lru_cache(maxsize=8)
 def build_llm(cfg: AgentConfig = AgentConfig()) -> ChatGroq:
-    """Cached per distinct config, same rationale as build_agent."""
     return ChatGroq(model=cfg.model, temperature=cfg.temperature, max_tokens=cfg.max_output_tokens)
 
 
