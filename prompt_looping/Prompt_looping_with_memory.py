@@ -1,9 +1,6 @@
 import os
 import re
-import json
 import logging
-from abc import ABC, abstractmethod
-from pathlib import Path
 from functools import lru_cache
 from dotenv import load_dotenv
 from dataclasses import dataclass
@@ -11,6 +8,8 @@ from typing import TypedDict, Optional
 
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+
+from prompt_registry import LoopState, MemoryStore, InMemoryStore, JSONFileStore, DEFAULT_STORE
 
 try:
     import tiktoken
@@ -34,7 +33,7 @@ class AgentConfig:
     max_output_tokens: int = 1024
     temperature: float = 0.4
     banned_terms: tuple = ("hack", "exploit", "malware")
-    max_history_chars: int = 6000  
+    max_history_chars: int = 6000  # cap on stored draft size, independent of live token limit
 
 
 class GuardrailError(Exception):
@@ -56,66 +55,8 @@ def validate_input(text: str, cfg: AgentConfig) -> None:
     if any(re.search(rf"\b{term}\b", lowered) for term in cfg.banned_terms):
         raise GuardrailError("Input contains disallowed content")
 
-class LoopState(TypedDict):
-    session_id: str
-    task: str
-    draft: str
-    critique: str
-    iteration: int       
-
-
-class MemoryStore(ABC):
-    @abstractmethod
-    def get(self, session_id: str) -> Optional[LoopState]: ...
-
-    @abstractmethod
-    def save(self, session_id: str, state: LoopState) -> None: ...
-
-    @abstractmethod
-    def clear(self, session_id: str) -> None: ...
-
-
-class InMemoryStore(MemoryStore):
-    def __init__(self):
-        self._data: dict[str, LoopState] = {}
-
-    def get(self, session_id: str) -> Optional[LoopState]:
-        return self._data.get(session_id)
-
-    def save(self, session_id: str, state: LoopState) -> None:
-        self._data[session_id] = state
-
-    def clear(self, session_id: str) -> None:
-        self._data.pop(session_id, None)
-
-
-class JSONFileStore(MemoryStore):
-    def __init__(self, directory: str = ".loop_memory"):
-        self.dir = Path(directory)
-        self.dir.mkdir(exist_ok=True)
-
-    def _path(self, session_id: str) -> Path:
-        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
-        return self.dir / f"{safe_id}.json"
-
-    def get(self, session_id: str) -> Optional[LoopState]:
-        path = self._path(session_id)
-        if not path.exists():
-            return None
-        try:
-            return json.loads(path.read_text())
-        except Exception:
-            logger.exception("Failed reading memory file for session %s", session_id)
-            return None
-
-    def save(self, session_id: str, state: LoopState) -> None:
-        self._path(session_id).write_text(json.dumps(state))
-
-    def clear(self, session_id: str) -> None:
-        self._path(session_id).unlink(missing_ok=True)
-
-
-DEFAULT_STORE: MemoryStore = InMemoryStore()
+# Memory: state persists ACROSS calls, keyed by session_id.
+# Schema (LoopState) and storage backends now live in prompt_registry.py
 
 GENERATE_PROMPT = ChatPromptTemplate.from_template(
     "Write a detailed answer for:\n{task}"
@@ -146,6 +87,10 @@ def _safe_invoke(chain, inputs: dict, step_name: str) -> Optional[str]:
     except Exception as e:
         logger.exception("Loop step '%s' failed: %s", step_name, e)
         return None
+
+
+
+# Stateful loop
 
 def stateful_loop(
     session_id: str,
@@ -220,6 +165,7 @@ def stateful_loop(
 
         logger.info("Session %s: iteration %d complete", session_id, state["iteration"])
 
+    # Persist evolved state for the next call, capping stored size independent of live token checks
     persisted = dict(state)
     persisted["draft"] = state["draft"][: cfg.max_history_chars]
     store.save(session_id, persisted)
@@ -248,4 +194,7 @@ if __name__ == "__main__":
     session = "demo-session-1"
     print(run_stateful_loop(session, "Explain why rate limiting matters for public APIs"))
     print("---")
+    # Second call, same session: evolves the previous answer instead of starting over
     print(run_stateful_loop(session, "Now extend it to cover rate limiting for internal microservices too"))
+    print("---")
+    print(f"Registry sessions on record: {DEFAULT_STORE.list_sessions()}")
