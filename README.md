@@ -1,88 +1,126 @@
 # Prompt Looping
 
-> LLM-level loop -> the user holds the agent over iterative prompts; the user holds the autonomy over the responses generated throughout the course of the loop.
+> Exploring iterative LLM control loops where model outputs become inputs to subsequent reasoning steps.
 
-- You repeatedly call the model with updated prompts
-- The loop is driven by **prompt → response → new prompt**
-- Usually controlled manually or via a framework
+**Prompt Looping** is a small experimental project exploring how repeated LLM calls can be structured into controlled refinement loops.
 
-### Key characteristics:
+Instead of treating an LLM call as a one-shot operation, the loop maintains a state that evolves through repeated **prompt → response → update** cycles.
 
-- Can be stateful/stateless, depending on whether the user defines memory
-- Scripted by the user, runs iteratively
-- Autonomy remains with the author of the prompts (not the LLM itself)
-- Static loop mechanism
-- In practice, wrapped with guardrails (input validation, banned-content checks), a token budget, and per-step error handling so one bad LLM call doesn't crash the whole loop
+## Core Idea
 
-## Prompt control loop
-
-Deterministic loop controlling the LLM's response; the response of the LLM depends on its previous response.
-
-> Constantly evolving prompts with repeated LLM calls
-
-```python
-state = initial_input()
-while not done:
-    prompt = build_prompt(state)
-    output = llm(prompt)
-    state = update(state, output)
+```text
+Input
+  ↓
+Build Prompt
+  ↓
+LLM
+  ↓
+Response
+  ↓
+Update State
+  ↓
+Converged?
+ ├─ No → repeat
+ └─ Yes → return result
 ```
 
-#### Without memory
+The project explores different ways of managing this loop:
 
-- Stateless across iterations - responses are non-persistent and cannot be reused as a prompt to the LLM once the call returns
-- Context -> only what is passed as input by the user (explicitly), per call
-- Deterministic and predictable
-- State managed entirely by the caller, rebuilt fresh on every invocation
+* **Stateless loops** — state is explicitly passed between iterations.
+* **Stateful loops** — persistent state is maintained across calls.
+* **Iterative refinement** — generate → critique → improve.
+* **Recursive loops** — recursively decompose and combine intermediate results.
+* **Convergence control** — stop when further iterations no longer improve the result.
+* **Guardrails** — token limits, validation, and per-step failure handling.
 
-```python
-state = {prev_response}
+## Architecture
+
+### Stateless
+
+Each invocation owns its state and constructs the next iteration explicitly.
+
+```text
+Input
+  ↓
+Generate
+  ↓
+Critique
+  ↓
+Refine
+  ↓
+Output
 ```
 
-**In practice** (see `stateless_agent.py`):
+No persistent state exists between independent calls.
 
-- Each call validates input, builds its own chain/agent from a cached LLM instance, and runs generate → critique → refine with no shared mutable state across calls
-- A convergence guard exits early when a refinement stops changing the draft
-- A token check truncates the draft before feeding it back in, since it can grow every iteration
-- Failures are caught per step (`_safe_invoke`) so the loop returns the last good draft instead of crashing
+### Stateful
 
-#### With Memory
+A memory abstraction persists the evolving state across calls.
 
-- Memory introduced as an abstraction for response persistence
-- Memory externalizes state management from your loop
-
-```python
-LangChain manages:
-    memory.store(messages)
-    memory.inject(prompt)
+```text
+Session
+  ↓
+Load State
+  ↓
+Evolve Prompt
+  ↓
+LLM
+  ↓
+Save State
+  ↓
+Next Iteration
 ```
 
-**In practice** (see `stateful_agent.py`):
+The implementation keeps memory storage separate from the loop itself, allowing the backing store to be replaced without changing the control logic.
 
-- A `MemoryStore` interface (`get` / `save` / `clear`) keyed by `session_id` decouples the loop from _where_ state lives - in-memory dict for process lifetime, JSON file (or a DB/Redis store) for persistence across restarts
-- On each call, prior state is loaded; if present, the prompt **evolves** the previous draft (`EVOLVE_PROMPT`) instead of regenerating from scratch
-- Iteration count is cumulative across calls for a session, so `max_iters` bounds new refinement work per call, not the session's whole history
-- Stored draft size is capped independently from the live per-call token limit, so memory doesn't grow unbounded across many sessions
+## Iterative vs Recursive
 
-### Iterative prompt loop
+### Iterative
 
-> Linear refinement -> each iteration enhances the response by transforming/critiquing the previous response Generate -> Critique -> Improve -> Simplify (linear flow)
-
-- Deterministic / static loop
-- Fixed number of steps, or convergence-based exit
-- Cons -> context growth may be non-linear (mitigated with a token check + truncation per iteration)
-
-### Recursive prompt loop
-
-> Loop calls itself with modified inputs
-
-```python
-def f(x):
-    if base_case(x):
-        return result
-    sub_results = [f(x1), f(x2), f(x3), ...]
-    return combine(sub_results)
+```text
+Generate → Critique → Improve → Simplify → ...
 ```
 
-- Non-linear structure of outputs
-- Cons -> context overflow
+A linear refinement process with a fixed iteration limit or convergence-based termination.
+
+### Recursive
+
+```text
+              Task
+           /    |    \
+         A      B      C
+        / \    / \    / \
+      ... ... ... ... ... ...
+           ↓
+        Combine
+```
+
+Recursive loops allow a task to be decomposed into multiple independent sub-problems before their results are combined.
+
+## Design Principles
+
+* Keep **loop control deterministic**.
+* Keep **state management explicit**.
+* Bound iterations and token usage.
+* Fail safely and preserve the last valid result.
+* Stop when additional refinement provides no meaningful change.
+* Keep the orchestration layer independent from the underlying LLM.
+
+## Project Structure
+
+```text
+prompt_looping/
+├── stateless_agent.py
+├── stateful_agent.py
+└── ...
+```
+
+## Status
+
+Experimental / research prototype.
+
+The project is primarily intended to explore **LLM control-flow patterns, state management, and iterative reasoning architectures** rather than provide a production-ready agent framework.
+
+## License
+
+MIT
